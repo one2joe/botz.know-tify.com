@@ -182,6 +182,8 @@ Loop each event
         LineService::reply($replyToken, $response)
 ```
 
+> **AI Clarification**: The LLM is prompted to ask clarifying questions when the user's message is ambiguous (e.g., vague intent, multiple possible interpretations), but answer directly when intent is clear. No separate state machine — the AI decides naturally based on the prompt. The conversation summary captures both answers and follow-up questions, so context carries across turns.
+
 ---
 
 ## 4. Database Tables
@@ -782,3 +784,4 @@ $zenProvider = new ZenProvider(guzzle: $guzzle, model: $model, baseUrl: $baseUrl
 12. **Repository pattern** — Data access isolated in repositories. Services call repositories, never write SQL directly.
 13. **Readonly models** — Models are immutable value objects with `readonly` properties. Repositories are responsible for creation.
 14. **Database migration runner** — `migrate.php` reads raw `.sql` files, tracks execution in `migrations` table. Prevents double execution.
+15. **AI clarification instead of structured command flow** — When customer message is ambiguous (not an admin command), the LLM asks clarifying questions naturally via prompt instructions. No separate state machine, no mode toggling. The system prompt tells the AI: "If the user's intent is unclear, ask for clarification. If clear, answer directly." Conversation summaries carry both answers and follow-ups across turns.
