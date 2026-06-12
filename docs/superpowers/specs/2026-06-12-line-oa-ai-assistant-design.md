@@ -20,9 +20,9 @@ Based on: PRD.md (same directory root)
 | Database | MySQL 8 via PDO (prepared statements only) | Per PRD — SQL injection prevention |
 | Database Migration | Raw SQL files + PHP `migrate.php` runner + `migrations` tracking table | Schema changes are frequent; version-controlled SQL with tracking |
 | LINE SDK | `linecorp/line-bot-sdk` v12.5 | Latest version. Uses Guzzle natively. Provides `EventRequestParser` for webhook signature verification + event deserialization |
-| Admin Onboarding | First admin via `init <ADMIN_SETUP_CODE>` in LINE Chat | No DB insert needed. `ADMIN_SETUP_CODE` in `.env`. Remove from `.env` to disable |
-| Admin Management | `/invite` generates 1-time code → recipient sends `accept <code>` | No need to know LINE User ID. 24h expiration |
-| API Key Management | Separate `api_keys` table — primary + backups for auto failover | If primary key fails, try backup automatically |
+| Admin Onboarding | First person to message bot after deploy = แอดมินหลัก automatically | No setup code needed. Simple and fast |
+| Admin Management | `/เชิญ` generates 1-time code → LINE URL with pre-filled text → recipient taps link → auto-activated | No need to type "accept". 24h expiration, single-use |
+| API Key Management | Separate `api_keys` table — system manages primary/backup order automatically | Keys added via `/เพิ่มคีย์`. Latest key = primary, older keys = backups |
 
 ### Dependencies
 
@@ -60,10 +60,9 @@ botz.know-tify.com/
 │   ├── 003_create_rules.sql
 │   ├── 004_create_chat_logs.sql
 │   ├── 005_create_bot_settings.sql
-│   ├── 006_create_training_logs.sql
-│   ├── 007_create_invite_codes.sql
-│   ├── 008_create_api_keys.sql
-│   └── 009_create_eval_criteria.sql
+│   ├── 006_create_invite_codes.sql
+│   ├── 007_create_api_keys.sql
+│   └── 008_create_eval_criteria.sql
 ├── migrate.php              ← Migration runner
 ├── src/
 │   ├── Container.php        ← Pimple wrapper / service registration
@@ -151,28 +150,54 @@ Loop each event
             ▼
         UserService::findOrCreate($userId)
             │
+            ├── First user ever? ──YES──→ Set role = 'admin' (แอดมินหลัก)
+            │                               → Reply "ยินดีต้อนรับ..."
+            │                               → Continue processing normally
+            │
             ▼
         ChatService::log('user', $messageText)
+            │
+            ▼
+        Starts with "INVITE_"?
+            │
+            ├── YES → InviteCodeService::activate($code, $userId)
+            │           ├── Valid? → Set role = 'helper_admin', mark code used
+            │           │            → Reply "ยินดีต้อนรับ..."
+            │           ├── Expired? → Reply "ลิงก์เชิญหมดอายุ..."
+            │           └── Used? → Reply "ลิงก์เชิญถูกใช้แล้ว..."
+            │
+            NO
             │
             ▼
         User IS Admin? ──YES──→ CommandService::parse($messageText)
             │                        │
             NO                       ▼
             ▼              ┌─── Has Command? ──YES──→ Execute → Reply
-        RuleService::match($message)    │
-            │                           NO
-            ▼                           │
-        Found Rule? ──YES──→ Reply      ▼
-            │                    (fall through to AI
-            NO                    if not a command)
+        API keys exist?        │
+            │                  NO
+            ├── NO (admin)  → Reply "กรุณา /เพิ่มคีย์ ก่อน..."
+            │                 │
+            ├── NO (customer) → Reply fallback (no key = no service)
+            │                  ▼
+            │            (fall through to AI
+            YES           if not a command)
+            │
+            ▼
+        RuleService::match($message)
+            │
+            ▼
+        Found Rule? ──YES──→ Reply (no AI call)
+            │
+            NO
             │
             ▼
         LLMService::ask($message)
           → build prompt with:
               - Settings (from bot_settings)
               - FAQ (all active, < 100)
-              - Conversation summary (from previous turn)
-          → try primary API key, failover to backup if needed
+              - Recent conversation context
+                (last 2 rounds; LLM decides if more context needed → up to 3 rounds)
+          → failover: try keys in order (latest added = primary)
           → ZenProvider::ask() via Guzzle
             │
             ▼
@@ -182,21 +207,21 @@ Loop each event
         LineService::reply($replyToken, $response)
 ```
 
-> **AI Clarification**: The LLM is prompted to ask clarifying questions when the user's message is ambiguous (e.g., vague intent, multiple possible interpretations), but answer directly when intent is clear. No separate state machine — the AI decides naturally based on the prompt. The conversation summary captures both answers and follow-up questions, so context carries across turns.
+> **AI Clarification**: The LLM is prompted to ask clarifying questions when the user's message is ambiguous (e.g., vague intent, multiple possible interpretations), but answer directly when intent is clear. No separate state machine — the AI decides naturally based on the prompt instructions.
 
 ---
 
 ## 4. Database Tables
 
 ### 4.1 `users`
-Per PRD. Stores LINE users with role.
+Stores LINE users with role. First user ever to message the bot becomes แอดมินหลัก.
 
 ```sql
 CREATE TABLE users (
     id INT AUTO_INCREMENT PRIMARY KEY,
     line_user_id VARCHAR(100) UNIQUE NOT NULL,
     display_name VARCHAR(255) DEFAULT NULL,
-    role ENUM('admin','user') NOT NULL DEFAULT 'user',
+    role ENUM('admin','helper_admin','user') NOT NULL DEFAULT 'user',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_line_user_id (line_user_id)
 );
@@ -261,33 +286,8 @@ INSERT INTO bot_settings (setting_key, setting_value) VALUES
 ('company_description', '');
 ```
 
-### 4.6 `training_logs`
-Per PRD. Log of all admin commands executed.
-
-```sql
-CREATE TABLE training_logs (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    admin_id INT NOT NULL,
-    command_type VARCHAR(50) NOT NULL,
-    content TEXT,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (admin_id) REFERENCES users(id)
-);
-```
-
-### 4.7 `migrations`
-Tracks which migration files have been executed.
-
-```sql
-CREATE TABLE migrations (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    filename VARCHAR(255) UNIQUE NOT NULL,
-    executed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-### 4.8 `invite_codes`
-For admin invitation system.
+### 4.6 `invite_codes`
+For admin invitation. Code embedded in LINE URL (pre-filled text). Auto-activates when recipient sends first message containing `INVITE_<code>`.
 
 ```sql
 CREATE TABLE invite_codes (
@@ -304,8 +304,19 @@ CREATE TABLE invite_codes (
 );
 ```
 
-### 4.9 `api_keys`
-LLM provider API keys with primary/backup support.
+### 4.7 `migrations`
+Tracks which migration files have been executed.
+
+```sql
+CREATE TABLE migrations (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    filename VARCHAR(255) UNIQUE NOT NULL,
+    executed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### 4.8 `api_keys`
+LLM provider API keys. System manages primary/backup order automatically — latest added key is primary, older keys become backups.
 
 ```sql
 CREATE TABLE api_keys (
@@ -321,8 +332,8 @@ CREATE TABLE api_keys (
 );
 ```
 
-### 4.10 `eval_criteria`
-Admin-defined evaluation criteria for the `/review` system.
+### 4.9 `eval_criteria`
+Admin-defined evaluation criteria for the `/รีวิว` system.
 
 ```sql
 CREATE TABLE eval_criteria (
@@ -415,24 +426,24 @@ public function ask(string $message): string
 
 ---
 
-## 6. Conversation Summary
+## 6. Conversation Context (C2)
 
-Instead of sending raw chat history, the system maintains a concise **conversation summary** generated by the LLM:
+Instead of LLM-generated summaries, the system keeps **recent raw messages** from `chat_logs` and dynamically adjusts context size:
+
+### Algorithm
 
 ```
-Turn 1:
-  User: ร้านเปิดกี่โมง
-  → Send prompt: (FAQ + summary="" + userMessage)
-  → LLM responds + generates summary:
-     Summary: "ลูกค้าถามเวลาทำการร้าน"
-     Answer: "เปิดทุกวัน 09:00-18:00 ค่ะ"
-
-Turn 2:
-  User: แล้วปิดกี่โมง
-  → Send prompt: (FAQ + summary="ลูกค้าถามเวลาทำการร้าน" + userMessage)
-  → LLM knows context → answers correctly
-  → Updates summary: "ลูกค้าถามเวลาทำการ (เปิด 09:00 ปิด 18:00)"
+1. Fetch last 2 rounds (user + assistant) from chat_logs for this user
+2. If time gap between newest and oldest in context > 30 min → fall back to 1 round
+3. If not too old → include 2 rounds in prompt
+4. LLM evaluates if more context is needed:
+   - If message refers to previous turns → include up to 3 rounds
+   - If message is a new topic → keep at 2 rounds (or 1 if timed out)
+5. Token limit: if total prompt (FAQ + settings + context) exceeds ~4000 tokens,
+   truncate oldest rounds first
 ```
+
+No separate `conversation_summaries` table. No LLM call for summary generation. Context is built from raw chat_logs at request time.
 
 ### Prompt Template
 
@@ -445,8 +456,7 @@ Turn 2:
 คำถามที่พบบ่อย:
 {FAQ_DATA}
 
-ประวัติการสนทนาล่าสุด:
-{CONVERSATION_SUMMARY}
+{CONVERSATION_CONTEXT}
 
 ข้อความล่าสุดจากลูกค้า:
 {USER_MESSAGE}
@@ -457,14 +467,10 @@ Turn 2:
 3. อย่าเดาราคา ห้ามสร้างโปรโมชั่น
 4. ตอบเป็นภาษาไทย
 5. กระชับ ได้ใจความ
-6. ถ้าไม่รู้ ให้ตอบ: ขออภัย ระบบไม่สามารถให้บริการได้ในขณะนี้
-7. ต่อท้ายคำตอบด้วย:
-   ---
-   Summary: <สรุปประเด็นที่คุยกันมาทั้งหมด 1-2 ประโยคสั้นๆ>
-   ---
+6. ถ้าข้อความของลูกค้าคลุมเครือหรือไม่ชัดเจน ให้ถามกลับเพื่อขอรายละเอียดเพิ่ม
+   ถ้าชัดเจนแล้ว ให้ตอบตรงๆ ไม่ต้องถามกลับโดยไม่จำเป็น
+7. ถ้าไม่รู้ ให้ตอบ: ขออภัย ระบบไม่สามารถให้บริการได้ในขณะนี้
 ```
-
-The `LLMService` parses the `Summary:` section from the response and stores it for the next turn.
 
 ---
 
@@ -472,151 +478,339 @@ The `LLMService` parses the `Summary:` section from the response and stores it f
 
 ### 7.1 First Admin Setup
 
-1. Deploy system with `ADMIN_SETUP_CODE=your-secret` in `.env`
-2. First person sends `init your-secret` via LINE Chat
-3. System finds user, sets `role = 'admin'`
-4. Remove `ADMIN_SETUP_CODE` from `.env` to prevent future registrations
+1. Deploy system → first person to send any message via LINE Chat
+2. System checks: is this the first user in `users` table?
+3. If yes → set `role = 'admin'` (แอดมินหลัก) automatically
+4. Reply with welcome message + prompt to add API key
 
-### 7.2 Admin Commands (Thai)
+No setup code needed. No `init` command. The very first message = แอดมินหลัก.
 
-All commands use Thai language. Both English aliases and Thai commands work.
+### 7.2 Admin Roles & Permissions
 
-| Command | Description | Format |
-|---------|-------------|--------|
-| `/เพิ่มคำถาม` | Add FAQ | Q: ... A: ... |
-| `/แก้คำถาม` | Edit FAQ | id: N, answer: ... |
-| `/ลบคำถาม` | Delete FAQ | id: N |
-| `/เพิ่มกฎ` | Add Rule | keyword: ..., response: ... |
-| `/ลบกฎ` | Delete Rule | id: N |
-| `/สถิติ` | Statistics | (no args) |
-| `/เพิ่มแอดมิน` | Add admin by LINE User ID | LINE_USER_ID |
-| `/ลบแอดมิน` | Remove admin by LINE User ID | LINE_USER_ID |
-| `/เชิญ` | Generate invite code | (no args) → outputs code |
-| `รับเชิญ <code>` | Accept invitation | code |
-| `/ตั้งค่าคีย์` | Set API key | คีย์: ..., ชื่อ: ..., หลัก: 1/0 |
-| `/ลบคีย์` | Delete API key | id: N |
-| `/ดูคีย์` | List API keys | (no args) |
-| `/ประเมิน` | Start chat log evaluation | (no args) |
-| `/สอนประเมิน` | Teach evaluation criteria | free text in Thai |
-| `/รีเซ็ตประเมิน` | Reset all reviewed flags | (no args) or `N` for last N days |
-| `/ยกเลิก` | Cancel pending invite code | (no args) |
+| Permission | แอดมินหลัก | ผู้ช่วยแอดมิน |
+|---|---|---|
+| เพิ่ม/แก้/ลบ FAQ | ✅ | ✅ |
+| เพิ่ม/ลบ Rule | ✅ | ✅ |
+| ดูสถิติ (`/สถิติ`) | ✅ | ✅ |
+| จัดการ Settings (`/ตั้งค่า`) | ✅ | ✅ |
+| รีวิวบทสนทนา (`/รีวิว`) | ✅ | ✅ |
+| จัดการเกณฑ์ประเมิน (`/เกณฑ์ประเมิน`) | ✅ | ✅ |
+| เชิญ admin ใหม่ (`/เชิญ`) | ✅ | ❌ |
+| ถอดสิทธิ์ admin (`/ถอดสิทธิ์`) | ✅ | ❌ |
+| จัดการ API Keys (`/เพิ่มคีย์`) | ✅ | ❌ |
 
-### 7.3 Interactive Command Flow
+### 7.3 Admin Commands (Thai)
 
-Commands support two modes: **direct input** (power users) and **AI-guided** (recommended UX).
+All commands in Thai. No English aliases. Admin types `/คำสั่ง` → bot asks interactively.
 
-#### Direct Input Mode
-Admin provides all data in one message:
+| Command | Who can use | Description |
+|---------|-------------|-------------|
+| `/เพิ่มfaq` | all admin | Add FAQ |
+| `/แก้ไขfaq` | all admin | Edit FAQ |
+| `/ลบfaq` | all admin | Delete FAQ (requires confirmation) |
+| `/รายการfaq` | all admin | List all FAQ (10 per page, Quick Reply pagination) |
+| `/เพิ่มrule` | all admin | Add Rule |
+| `/ลบrule` | all admin | Delete Rule (requires confirmation) |
+| `/รายการrule` | all admin | List all Rules (10 per page, Quick Reply pagination) |
+| `/สถิติ` | all admin | View statistics |
+| `/รีวิว` | all admin | Review/evaluate conversations (1 topic at a time) |
+| `/เกณฑ์ประเมิน` | all admin | View/manage evaluation criteria |
+| `/ตั้งค่า` | all admin | Manage bot settings |
+| `/เชิญ` | แอดมินหลัก only | Generate invite link |
+| `/ถอดสิทธิ์` | แอดมินหลัก only | Remove admin privileges |
+| `/เพิ่มคีย์` | แอดมินหลัก only | Add API key |
+| `/help` | all admin | Show help |
+
+### 7.4 AI-Guided Interactive Flow
+
+Admin types `/คำสั่ง` → bot asks for missing info step by step (multiple bubbles, max 5). No need to remember format.
+
+**Example: `/เพิ่มfaq`**
 
 ```
-/เพิ่มคำถาม
+Admin: /เพิ่มfaq
 
-Q: ร้านเปิดกี่โมง
-A: เปิดทุกวัน 09:00-18:00 ค่ะ
-```
-→ Bot executes immediately: ✅ เพิ่ม FAQ สำเร็จ!
-
-#### AI-Guided Mode
-If admin sends only the command without data, AI asks step by step:
-
-```
-Admin: /เพิ่มคำถาม
-
-Bot: ได้ค่า! ต้องการเพิ่ม FAQ
-     คำถามคืออะไรคะ?
+บอลลูน 1:
+┌───────────────────────────────────────┐
+│ กรุณาระบุคำถามที่ต้องการเพิ่ม           │
+│                                       │
+│ เช่น: ร้านเปิดกี่โมง                   │
+└───────────────────────────────────────┘
 
 Admin: ร้านเปิดกี่โมง
 
-Bot: แล้วคำตอบคืออะไรคะ?
+บอลลูน 1:
+┌───────────────────────────────────────┐
+│ ✅ ได้คำถาม: "ร้านเปิดกี่โมง"          │
+│                                       │
+│ กรุณาระบุคำตอบ                        │
+│                                       │
+│ เช่น: เปิดทุกวัน 09:00-18:00           │
+└───────────────────────────────────────┘
 
-Admin: เปิดทุกวัน 09:00-18:00 ค่ะ
+Admin: เปิดทุกวัน 09:00-18:00 น.
 
-Bot: ✅ เพิ่ม FAQ แล้ว!
-     คำถาม: ร้านเปิดกี่โมง
-     คำตอบ: เปิดทุกวัน 09:00-18:00 ค่ะ
-     ID: 8
-     ต้องการเพิ่มอีกไหมคะ? (พิมพ์ /เพิ่มคำถาม หรือพิมพ์อย่างอื่นเพื่อจบ)
+บอลลูน 1:
+┌───────────────────────────────────────┐
+│ ✅ บันทึก FAQ เรียบร้อย               │
+│                                       │
+│ Q: ร้านเปิดกี่โมง                      │
+│ A: เปิดทุกวัน 09:00-18:00 น.          │
+│ ID: 8                                │
+└───────────────────────────────────────┘
 ```
 
-This applies to all commands that require arguments:
-- `/เพิ่มคำถาม` → AI asks for Q: and A:
-- `/แก้คำถาม` → AI asks for id: and field to edit
-- `/ลบคำถาม` → AI asks for id:
-- `/เพิ่มกฎ` → AI asks for keyword: and response:
-- `/ลบกฎ` → AI asks for id:
-- `/ตั้งค่าคีย์` → AI asks for คีย์:, ชื่อ:, หลัก:
+**Example: `/ลบfaq` (with confirmation)**
 
-### 7.4 Invite Code Flow
+```
+Admin: /ลบfaq
+
+บอลลูน 1:
+┌───────────────────────────────────────┐
+│ กรุณาระบุ ID ของ FAQ ที่ต้องการลบ      │
+│                                       │
+│ พิมพ์ /รายการfaq เพื่อดูทั้งหมด        │
+└───────────────────────────────────────┘
+
+Admin: 3
+
+บอลลูน 1:
+┌───────────────────────────────────────┐
+│ FAQ #3                                │
+│ Q: ร้านเปิดกี่โมง                      │
+│ A: เปิดทุกวัน 09:00-18:00 น.          │
+└───────────────────────────────────────┘
+
+บอลลูน 2:
+┌───────────────────────────────────────┐
+│ ⚠️ ยืนยันลบ FAQ นี้?                   │
+│                                       │
+│ พิมพ์ "ใช่" เพื่อยืนยัน หรือ "ไม่" เพื่อยกเลิก │
+└───────────────────────────────────────┘
+
+Admin: ใช่
+
+บอลลูน 1:
+┌───────────────────────────────────────┐
+│ ✅ ลบ FAQ #3 เรียบร้อย               │
+└───────────────────────────────────────┘
+```
+
+All delete commands require confirmation. All multi-step interactions are split across multiple text bubbles (max 5 per reply).
 
 ### 7.5 Invite Code Flow
 
-```
-Admin sends: /invite
-Bot: รหัสเชิญของคุณ: INVITE-a1b2c3d4
-     (ใช้ได้ 1 ครั้ง | หมดอายุ 24 ชม.)
+**Step 1: Admin หลัก พิมพ์ `/เชิญ`**
 
-Admin shares code with recipient → recipient sends:
-accept INVITE-a1b2c3d4
-Bot: คุณเป็น Admin แล้ว!
 ```
+Bot replies — บอลลูน 1 (สำหรับ admin หลักเท่านั้น):
+┌───────────────────────────────────────┐
+│ ✅ สร้างลิงก์เชิญเรียบร้อย            │
+│                                       │
+│ ⚠️ ลิงก์นี้ห้ามกดเอง                   │
+│    ให้ส่งต่อเฉพาะบอลลูนด้านล่าง         │
+│    ให้คนที่ต้องการเชิญเท่านั้น          │
+└───────────────────────────────────────┘
+
+Bot replies — บอลลูน 2 (พร้อมส่งต่อ):
+┌───────────────────────────────────────┐
+│ คุณได้รับเชิญให้เป็นผู้ช่วยแอดมิน       │
+│                                       │
+│ กดลิงก์ด้านล่างเพื่อยืนยันสิทธิ์        │
+│ ลิงก์หมดอายุใน 24 ชั่วโมง            │
+│                                       │
+│ https://line.me/R/oaMessage/          │
+│ @340bzlph/?text=INVITE_a1b2c3         │
+└───────────────────────────────────────┘
+```
+
+**Step 2: Admin หลัก Forward บอลลูน 2 ให้ผู้รับ**
+
+**Step 3: ผู้รับกดลิงก์**
+
+LINE opens chat with bot. Message `INVITE_a1b2c3` is pre-filled in input box. User taps send.
+
+**Step 4: ระบบรับข้อความ `INVITE_...`**
+
+- Check if code valid (not expired, not used)
+- If valid → set `role = 'helper_admin'`, mark code used
+- If expired → Reply: "ลิงก์เชิญหมดอายุแล้ว..."
+- If used → Reply: "ลิงก์เชิญนี้ถูกใช้ไปแล้ว..."
+
+```
+Reply on success:
+┌───────────────────────────────────────┐
+│ ✅ ยินดีต้อนรับ!                       │
+│                                       │
+│ คุณได้รับเชิญเป็นผู้ช่วยแอดมินเรียบร้อย  │
+│                                       │
+│ พิมพ์ /help เพื่อดูคำสั่งที่ใช้งานได้   │
+└───────────────────────────────────────┘
+```
+
+### 7.6 API Key Management
+
+**Flow when no key exists:**
+
+Any message from admin (except `/เพิ่มคีย์`) → reply:
+```
+┌───────────────────────────────────────┐
+│ ⚠️ ระบบยังไม่มี API Key              │
+│                                       │
+│ กรุณาพิมพ์ /เพิ่มคีย์ เพื่อตั้งค่า      │
+│ ให้บอทซ์ทำงานได้                      │
+└───────────────────────────────────────┘
+```
+
+**Adding a key:**
+
+```
+Admin: /เพิ่มคีย์
+
+บอลลูน 1:
+┌───────────────────────────────────────┐
+│ กรุณาส่ง API Key ของคุณมาได้เลย        │
+│                                       │
+│ (เช่น sk-xxxx...)                     │
+└───────────────────────────────────────┘
+
+Admin: sk-zen-xxxxxxxxxxxx
+
+บอลลูน 1:
+┌───────────────────────────────────────┐
+│ ✅ บันทึก API Key เรียบร้อย           │
+│                                       │
+│ Key นี้ถูกใช้เป็นตัวหลักแล้ว           │
+│ พิมพ์ /เพิ่มคีย์ เพื่อเพิ่ม            │
+│ Key สำรองเพิ่มเติมได้                 │
+└───────────────────────────────────────┘
+```
+
+**Backup management:** System handles automatically. Latest added key = primary. Older keys = backups. Failover tries keys in reverse chronological order until one works. If all fail → fallback message.
 
 ---
 
 ## 8. Review & Evaluation System
 
-### 8.1 Flow
+### 8.1 Flow — `/รีวิว`
 
+1. Admin sends `/รีวิว`
+2. Bot fetches 1 unreviewed conversation topic (newest first, `is_reviewed = 0`)
+3. Sends to LLM with current `eval_criteria` for evaluation
+4. LLM evaluates the response and explains reasoning
+
+**Case 1 — AI determines response is good:**
 ```
-Admin sends: /review
-    │
-    ▼
-Bot fetches unreviewed chat logs (is_reviewed = 0)
-    │
-    ▼
-Batches logs into groups of 20-50
-    │
-    ▼
-For each batch, sends to LLM for evaluation:
-  - "Should we add a FAQ for this?"
-  - "Rate this response 1-5"
-  - Uses stored eval_criteria as guidelines
-    │
-    ▼
-Presents results to Admin one question at a time:
-  "Chat #42: 'ร้านเปิดกี่โมง' → 'เปิดทุกวัน 09:00-18:00'
-   → ควรเพิ่ม FAQ นี้? (ใช่/ไม่ใช่/แก้ไข)"
-    │
-    ▼
-Admin answers → Bot moves to next question
-Shows progress: "กำลังตรวจสอบ 45/120 (37%)"
-    │
-    ▼
-After batch complete, ask: "ต้องการทำต่ออีกไหม?"
-If yes → next batch, else → stop
+→ Auto mark as reviewed (is_reviewed = 1)
+→ Ask: "ต้องการดูประเด็นต่อไปไหม?"
+   [Quick Reply: ดูต่อ / จบ]
 ```
 
-### 8.2 Eval Criteria
+**Case 2 — AI determines response may need improvement:**
+```
+บอลลูน 1:
+┌───────────────────────────────────────┐
+│ ⚠️ บทสนทนาที่อาจต้องปรับปรุง          │
+│                                       │
+│ ลูกค้า: ราคาเท่าไหร่                  │
+│ บอทซ์: ขออภัย ไม่มีข้อมูลค่ะ           │
+│                                       │
+│ เหตุผล: FAQ #3 มีข้อมูลราคาอยู่แล้ว    │
+│         แต่บอทซ์ตอบว่าไม่มีข้อมูล       │
+└───────────────────────────────────────┘
 
-Admin teaches the LLM how to evaluate conversations:
+บอลลูน 2:
+┌───────────────────────────────────────┐
+│ คุณคิดว่าบอทซ์ตอบผ่านไหม?             │
+│                                       │
+│ (พิมพ์ "ผ่าน" หรือ "ไม่ผ่าน")         │
+└───────────────────────────────────────┘
+```
+
+**If admin says "ผ่าน"** → mark `is_reviewed = 1`, ask "ดูต่อ?"
+
+**If admin says "ไม่ผ่าน"** → enter teach mode:
 
 ```
-Admin: /evalcriteria "เวลาลูกค้าถามเรื่องราคาแต่เราไม่มีข้อมูล ให้ถือว่าตอบไม่ดี"
-    │
-    ▼
-LLM extracts structured criteria from natural language
-    │
-    ▼
-Stored in `eval_criteria` table
-    │
-    ▼
-On next /review, criteria are sent to LLM as context
+บอลลูน 1:
+┌───────────────────────────────────────┐
+│ คุณต้องการสอนกฎการรีวิวเพิ่มเติมไหม?    │
+│                                       │
+│ พิมพ์กฎที่ต้องการเพิ่ม                 │
+│ หรือพิมพ์ "ข้าม" เพื่อไปปรับ FAQ       │
+└───────────────────────────────────────┘
+
+Admin: เวลาลูกค้าถามเรื่องราคา ต้องตอบจาก FAQ เท่านั้น
+
+บอลลูน 1:
+┌───────────────────────────────────────┐
+│ ✅ บันทึกกฎการรีวิวแล้ว               │
+│                                       │
+│ ต้องการเพิ่มอีกไหม?                    │
+│ หรือพิมพ์ "พอ" เพื่อไปปรับ FAQ         │
+└───────────────────────────────────────┘
+
+Admin: พอ
+
+บอลลูน 1:
+┌───────────────────────────────────────┐
+│ ถึงเวลาปรับปรุงคลังความรู้ (FAQ)       │
+│                                       │
+│ จากผลรีวิวที่ไม่ผ่าน                   │
+│ ต้องการเพิ่ม/แก้ FAQ นี้ไหม?           │
+│                                       │
+│ พิมพ์ /เพิ่มfaq หรือ /แก้ไขfaq        │
+│ เพื่อจัดการ                           │
+│ หรือพิมพ์ "พอ" เพื่อกลับไปรีวิวต่อ     │
+└───────────────────────────────────────┘
 ```
 
-### 8.3 Reset Review
+After admin finishes updating FAQ, bot asks "ดูประเด็นต่อไป?" → continue loop.
+
+### 8.2 Default Eval Criteria
+
+On first use, system has 6 default criteria:
+1. ตอบตรงกับคำถามของลูกค้า
+2. ใช้ข้อมูลที่ถูกต้องจาก FAQ
+3. ภาษาสุภาพ อ่านเข้าใจง่าย
+4. ตอบสั้น กระชับ ได้ใจความ
+5. ไม่มั่วข้อมูลหรือคิดคำตอบเอง
+6. แนะนำให้ติดต่อเจ้าหน้าที่เมื่อเกินความสามารถ
+
+Admin can view/edit/add/delete via `/เกณฑ์ประเมิน`.
+
+### 8.3 `/เกณฑ์ประเมิน` — Manage Criteria
 
 ```
-/resetreview       → reset all chat_logs.is_reviewed = 0
-/resetreview 7     → reset only logs from last 7 days
+Admin: /เกณฑ์ประเมิน
+
+บอลลูน 1:
+┌───────────────────────────────────────┐
+│ 📋 เกณฑ์การประเมินปัจจุบัน (6 ข้อ)    │
+│                                       │
+│ 1. ตอบตรงกับคำถามของลูกค้า            │
+│ 2. ใช้ข้อมูล FAQ                      │
+│ 3. ภาษาสุพาอ่านเข้าใจง่าย              │
+│ 4. ตอบสั้น กระชับ                     │
+│ 5. ไม่มั่วข้อมูล                       │
+│ 6. แนะนำเจ้าหน้าที่เมื่อเกินความสามารถ  │
+└───────────────────────────────────────┘
+
+บอลลูน 2:
+┌───────────────────────────────────────┐
+│ คำสั่งจัดการเกณฑ์:                     │
+│ /เกณฑ์ประเมิน เพิ่ม: <ข้อความ>         │
+│ /เกณฑ์ประเมิน แก้ไข #3: <ข้อความ>      │
+│ /เกณฑ์ประเมิน ลบ #5                  │
+└───────────────────────────────────────┘
+[Quick Reply: เพิ่ม | แก้ไข | ลบ | พอแล้ว]
+```
+
+### 8.4 `/รีเซ็ตประเมิน`
+
+```
+/รีเซ็ตประเมิน     → reset all chat_logs.is_reviewed = 0
+/รีเซ็ตประเมิน 7   → reset only logs from last 7 days
 ```
 
 ---
@@ -699,11 +893,15 @@ $zenProvider = new ZenProvider(guzzle: $guzzle, model: $model, baseUrl: $baseUrl
 |----------|----------|
 | Invalid LINE signature | Catch, HTTP 200, no processing |
 | Non-text message | Reply "ขออภัย ระบบรองรับเฉพาะข้อความเท่านั้น", no log |
+| No API key configured (admin) | Block all except `/เพิ่มคีย์`, prompt to add key |
+| No API key configured (customer) | Reply fallback "ขออภัย ระบบไม่สามารถให้บริการได้ในขณะนี้" |
 | LLM timeout (primary key) | Tries backup key automatically |
 | LLM timeout (all keys failed) | Reply "ขออภัย ระบบไม่สามารถให้บริการได้ในขณะนี้" |
 | DB connection failure | Log error, reply fallback |
 | Unknown admin command | Reply "ไม่พบคำสั่ง..." |
 | Malformed command | Reply "รูปแบบคำสั่งไม่ถูกต้อง..." |
+| Expired invite code | Reply "ลิงก์เชิญหมดอายุแล้ว กรุณาติดต่อแอดมินหลัก" |
+| Used invite code | Reply "ลิงก์เชิญนี้ถูกใช้ไปแล้ว กรุณาติดต่อแอดมินหลัก" |
 
 ---
 
@@ -731,7 +929,7 @@ $zenProvider = new ZenProvider(guzzle: $guzzle, model: $model, baseUrl: $baseUrl
 - `CommandServiceTest` — parse all command formats, handle malformed input
 - `RuleServiceTest` — match keywords, prioritization, no match case
 - `UserServiceTest` — findOrCreate, role checks
-- `LLMServiceTest` — prompt building with FAQ + settings + summary
+- `LLMServiceTest` — prompt building with FAQ + settings + conversation context
 - `ApiKeyServiceTest` — primary/backup failover logic
 - `FaqServiceTest` — CRUD with validation
 
@@ -773,15 +971,19 @@ $zenProvider = new ZenProvider(guzzle: $guzzle, model: $model, baseUrl: $baseUrl
 1. **LINE SDK v12** — Not v9. Uses Guzzle natively. Provides `EventRequestParser` + typed models for webhook events.
 2. **Guzzle for both LINE + Zen** — Single HTTP client instance, shared via container.
 3. **No `public/` directory** — `webhook.php` at project root. Same entry point for dev (Herd) and prod (Apache). No .htaccess rewrite.
-4. **Conversation summary instead of raw history** — LLM generates 1-2 sentence summary each turn. Reduces token usage and prevents LLM fixating on old messages.
+4. **Conversation context (C2) instead of LLM-generated summary** — Keep last 2-3 raw message rounds. LLM decides if context is relevant. No summary table, no extra LLM call. Saves tokens over summary approach.
 5. **LLMProvider interface** — Even though only Zen is planned, the interface ensures loose coupling and testability.
-6. **Separate `api_keys` table** — Primary + backup keys with auto-failover. Admin manages via LINE chat without touching `.env`.
-7. **API key failover** — If primary LLM key fails, attempt backup keys in order. All fail → fallback message.
-8. **Admin via `init <CODE>`** — First admin setup through LINE Chat. No DB insert needed. Code removable from `.env`.
-9. **Invite system** — `/invite` generates code. `accept <code>` activates admin. No need to share LINE User IDs.
-10. **`/review` with batch processing** — LLM evaluates unreviewed chats in batches, presents to admin one at a time with progress %, asks to continue after each batch.
-11. **`/evalcriteria`** — Admin writes in natural Thai, LLM extracts structured criteria. Stored in separate table for per-item management.
+6. **Separate `api_keys` table** — System manages primary/backup order automatically (latest added = primary). No admin overhead.
+7. **API key failover** — Try keys in reverse chronological order. All fail → fallback message.
+8. **First-user-as-admin** — First person to message bot after deploy = แอดมินหลัก. No setup code needed. Simple and secure (bot has no public visibility before deployment).
+9. **Invite via LINE URL** — `/เชิญ` generates LINE URL with pre-filled `INVITE_<code>`. Recipient taps link, sends first message → auto-activated. No "accept" command needed.
+10. **`/รีวิว` 1 topic at a time** — LLM evaluates with reasoning. Good → auto-pass. Not good → admin decides. Fail → admin teaches criteria → improves FAQ. Loop.
+11. **Default eval criteria** — 6 built-in criteria so `/รีวิว` works immediately. Admin can add/edit via `/เกณฑ์ประเมิน`.
 12. **Repository pattern** — Data access isolated in repositories. Services call repositories, never write SQL directly.
 13. **Readonly models** — Models are immutable value objects with `readonly` properties. Repositories are responsible for creation.
 14. **Database migration runner** — `migrate.php` reads raw `.sql` files, tracks execution in `migrations` table. Prevents double execution.
-15. **AI clarification instead of structured command flow** — When customer message is ambiguous (not an admin command), the LLM asks clarifying questions naturally via prompt instructions. No separate state machine, no mode toggling. The system prompt tells the AI: "If the user's intent is unclear, ask for clarification. If clear, answer directly." Conversation summaries carry both answers and follow-ups across turns.
+15. **AI clarification** — LLM prompted to ask when ambiguous, answer directly when confident. No state machine.
+16. **All commands in Thai** — No English aliases. `/help`, `/เพิ่มfaq`, `/ลบfaq`, `/เชิญ`, etc.
+17. **AI-guided interactive flow** — Type `/คำสั่ง` only, bot asks for missing info step by step in multiple bubbles (max 5). Delete requires confirmation.
+18. **Text messages + Quick Reply** — No Flex Message for MVP. All responses are text bubbles. Quick Reply used for pagination and choices.
+19. **No `training_logs` table** — Not needed. All admin actions logged via `chat_logs`.

@@ -17,32 +17,56 @@ Interface สำหรับ AI provider — ปัจจุบันใช้ Z
 ### Migration
 SQL script ที่ version controlled — รันผ่าน PHP migrate script, track สถานะใน `migrations` table
 
-### Admin
-ผู้ใช้ LINE OA ที่มี `role = 'admin'` — คนแรกต้องส่ง `init <ADMIN_SETUP_CODE>` ผ่าน LINE Chat เพื่อยืนยันตัวตน หลังจากนั้น Admin คนแรกสามารถสั่ง `/addadmin` และ `/removeadmin` เพื่อจัดการ Admin คนอื่นได้
-
-### ADMIN_SETUP_CODE
-รหัสลับใน `.env` ใช้สำหรับ init admin คนแรกผ่าน LINE Chat — ถ้าลบออกจาก .env แล้ว จะไม่สามารถตั้ง admin คนแรกผ่าน chat ได้อีก
-
-### Customer / User
+### ลูกค้า (Customer)
 ผู้ใช้ LINE OA ทั่วไป — `role = 'user'` — ใช้ LINE Chat กับ AI ได้อย่างเดียว ไม่มีสิทธิ์สั่ง admin command
+_ไม่ใช้_: User, ผู้ใช้
 
-### Command
-Admin command เช่น `/faq`, `/editfaq`, `/rule`, `/stats` — parser อยู่ใน `CommandService`
+### แอดมินหลัก (Super Admin)
+Admin ระดับสูงสุด — คนแรกที่ส่งข้อความถึงบอทหลัง Deploy จะกลายเป็นแอดมินหลักอัตโนมัติ — มีสิทธิ์ทำได้ทุกอย่าง รวมถึงเชิญ ถอดสิทธิ์ และจัดการ API Keys
+_ไม่ใช้_: Super Admin, Root Admin
+
+### ผู้ช่วยแอดมิน (Helper Admin)
+Admin ที่ได้รับเชิญจากแอดมินหลัก — `role = 'helper_admin'` — ทำได้ทุกอย่างยกเว้น: เชิญ admin ใหม่, ถอดสิทธิ์ admin คนอื่น, จัดการ API Keys
+_ไม่ใช้_: Sub Admin, Co-Admin
+
+### Invite Code
+รหัส `INVITE_xxx` ที่แอดมินหลักสร้างผ่าน `/เชิญ` — ฝังใน LINE URL (`line.me/R/oaMessage/@340bzlph/?text=INVITE_xxx`) — ผู้รับกดลิงก์ → LINE เปิดแชทบอท → ข้อความ pre-filled → ส่ง → auto-activate เป็นผู้ช่วยแอดมิน — อายุ 24 ชม., ใช้ครั้งเดียว
+_ไม่ใช้_: Accept code, Invitation code
+
+### API Keys
+Key ของ LLM provider (Zen) เก็บในตาราง `api_keys` — ระบบจัดการ primary/backup อัตโนมัติ (key ที่เพิ่มล่าสุด = primary, ก่อนหน้า = backup)
 
 ### Rule
 Keyword-based matching — ถ้าเจอ trigger_text ในข้อความ → ตอบ response_text ทันที โดยไม่เรียก LLM
+
+### Command
+Admin command ภาษาไทยล้วน เช่น `/เพิ่มfaq`, `/ลบfaq`, `/เชิญ`, `/รีวิว`, `/เพิ่มคีย์` — parser อยู่ใน `CommandService`
+_ไม่ใช้_: English aliases
+
+### Review (/รีวิว)
+ระบบประเมินบทสนทนาที่ยังไม่ได้รีวิว (`is_reviewed = 0`) — LLM ประเมินทีละ 1 ประเด็น — ถ้าดี → auto-pass, ถ้าไม่ดี → ให้แอดมินตัดสิน → แอดมินสอนกฎ → ปรับปรุง FAQ
+
+### Eval Criteria
+เกณฑ์ที่ใช้ในการประเมินบทสนทนา — มี 6 ข้อเริ่มต้น (default) — แอดมินเพิ่ม/แก้/ลบได้ผ่าน `/เกณฑ์ประเมิน` — ใช้ใน `/รีวิว` เพื่อให้ LLM มีแนวทางประเมิน
+
+### Conversation Context (C2)
+วิธีการส่งประวัติการสนทนาให้ LLM — เก็บ 2 รอบล่าสุดจาก `chat_logs` — LLM ตัดสินว่าเกี่ยวข้องกันไหม ถ้าเกี่ยว → ขยายเป็น 3 รอบ — ไม่มีตาราง `conversation_summaries`, ไม่มี LLM call เพื่อสรุป
+
+### AI Clarification
+พฤติกรรมของ LLM เมื่อลูกค้าส่งข้อความคลุมเครือ — LLM จะถามกลับเพื่อขอรายละเอียดเพิ่ม ถ้าชัดเจนแล้วจึงตอบตรงๆ — ไม่มี state machine แยก
 
 ### Zen API
 OpenAI-compatible API Gateway — ใช้ key เดียวเข้าถึงหลาย model ผ่าน `https://api.zen.run/v1`
 
 ### Timezone
-ระบบใช้ Asia/Bangkok (UTC+7) — ทุกอย่าง: DB, log, LINE timestamp ภาษาไทยล้วน ตลอดทั้งระบบ ผู้ใช้ ลูกค้า แอดมิน คนไทยทั้งหมด
+ระบบใช้ Asia/Bangkok (UTC+7) — ทุกอย่าง: DB, log, LINE timestamp
 
 ### Entry Point
 `webhook.php` ที่ project root — ไม่มี `public/` directory, ทั้ง dev (Herd) และ prod (Apache) ใช้ไฟล์เดียวกัน
 
-### API Keys
-เก็บ key ของ LLM provider (Zen) ในตาราง `api_keys` — มี primary ตัวหลัก + backups สำหรับ auto failover ถ้าตัวหลักเรียกไม่ได้
-
 ### Non-text messages
 LINE รองรับ message types หลายประเภท (image, sticker, location, ฯลฯ) — หาก user ส่งสิ่งเหล่านี้, bot จะ reply ว่า "ขออภัย ระบบรองรับเฉพาะข้อความเท่านั้นค่ะ" และไม่ log ลง chat_logs
+
+### Interactive Command Flow
+รูปแบบการทำงานของ Command — แอดมินพิมพ์แค่ `/คำสั่ง` โดยไม่ต้องมีข้อมูลต่อท้าย → บอทจะถามทีละขั้นตอน (แยกหลายบอลลูน, ไม่เกิน 5) — คำสั่งลบทุกประเภทต้องถามยืนยันก่อน
+_ไม่ใช้_: AI-guided mode
