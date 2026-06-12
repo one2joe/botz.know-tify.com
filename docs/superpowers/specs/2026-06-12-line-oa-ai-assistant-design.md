@@ -475,29 +475,78 @@ The `LLMService` parses the `Summary:` section from the response and stores it f
 3. System finds user, sets `role = 'admin'`
 4. Remove `ADMIN_SETUP_CODE` from `.env` to prevent future registrations
 
-### 7.2 Admin Commands
+### 7.2 Admin Commands (Thai)
+
+All commands use Thai language. Both English aliases and Thai commands work.
 
 | Command | Description | Format |
 |---------|-------------|--------|
-| `/faq` | Add FAQ | Q: ... A: ... |
-| `/editfaq` | Edit FAQ | id: N, answer: ... |
-| `/deletefaq` | Delete FAQ | id: N |
-| `/rule` | Add Rule | keyword: ..., response: ... |
-| `/deleterule` | Delete Rule | id: N |
-| `/stats` | Statistics | (no args) |
-| `/addadmin` | Add admin by LINE User ID | LINE_USER_ID |
-| `/removeadmin` | Remove admin by LINE User ID | LINE_USER_ID |
-| `/invite` | Generate invite code | (no args) → outputs code |
-| `accept <code>` | Accept invitation | code |
-| `/setkey` | Set API key | key_value, label, is_primary |
-| `/delkey` | Delete API key | id |
-| `/listkeys` | List API keys | (no args) |
-| `/review` | Start chat log evaluation | (no args) |
-| `/evalcriteria` | Teach evaluation criteria | free text in Thai |
-| `/resetreview` | Reset all reviewed flags | (no args) or `N` for last N days |
-| `/cancel` | Cancel pending invite code | (no args) |
+| `/เพิ่มคำถาม` | Add FAQ | Q: ... A: ... |
+| `/แก้คำถาม` | Edit FAQ | id: N, answer: ... |
+| `/ลบคำถาม` | Delete FAQ | id: N |
+| `/เพิ่มกฎ` | Add Rule | keyword: ..., response: ... |
+| `/ลบกฎ` | Delete Rule | id: N |
+| `/สถิติ` | Statistics | (no args) |
+| `/เพิ่มแอดมิน` | Add admin by LINE User ID | LINE_USER_ID |
+| `/ลบแอดมิน` | Remove admin by LINE User ID | LINE_USER_ID |
+| `/เชิญ` | Generate invite code | (no args) → outputs code |
+| `รับเชิญ <code>` | Accept invitation | code |
+| `/ตั้งค่าคีย์` | Set API key | คีย์: ..., ชื่อ: ..., หลัก: 1/0 |
+| `/ลบคีย์` | Delete API key | id: N |
+| `/ดูคีย์` | List API keys | (no args) |
+| `/ประเมิน` | Start chat log evaluation | (no args) |
+| `/สอนประเมิน` | Teach evaluation criteria | free text in Thai |
+| `/รีเซ็ตประเมิน` | Reset all reviewed flags | (no args) or `N` for last N days |
+| `/ยกเลิก` | Cancel pending invite code | (no args) |
 
-### 7.3 Invite Code Flow
+### 7.3 Interactive Command Flow
+
+Commands support two modes: **direct input** (power users) and **AI-guided** (recommended UX).
+
+#### Direct Input Mode
+Admin provides all data in one message:
+
+```
+/เพิ่มคำถาม
+
+Q: ร้านเปิดกี่โมง
+A: เปิดทุกวัน 09:00-18:00 ค่ะ
+```
+→ Bot executes immediately: ✅ เพิ่ม FAQ สำเร็จ!
+
+#### AI-Guided Mode
+If admin sends only the command without data, AI asks step by step:
+
+```
+Admin: /เพิ่มคำถาม
+
+Bot: ได้ค่า! ต้องการเพิ่ม FAQ
+     คำถามคืออะไรคะ?
+
+Admin: ร้านเปิดกี่โมง
+
+Bot: แล้วคำตอบคืออะไรคะ?
+
+Admin: เปิดทุกวัน 09:00-18:00 ค่ะ
+
+Bot: ✅ เพิ่ม FAQ แล้ว!
+     คำถาม: ร้านเปิดกี่โมง
+     คำตอบ: เปิดทุกวัน 09:00-18:00 ค่ะ
+     ID: 8
+     ต้องการเพิ่มอีกไหมคะ? (พิมพ์ /เพิ่มคำถาม หรือพิมพ์อย่างอื่นเพื่อจบ)
+```
+
+This applies to all commands that require arguments:
+- `/เพิ่มคำถาม` → AI asks for Q: and A:
+- `/แก้คำถาม` → AI asks for id: and field to edit
+- `/ลบคำถาม` → AI asks for id:
+- `/เพิ่มกฎ` → AI asks for keyword: and response:
+- `/ลบกฎ` → AI asks for id:
+- `/ตั้งค่าคีย์` → AI asks for คีย์:, ชื่อ:, หลัก:
+
+### 7.4 Invite Code Flow
+
+### 7.5 Invite Code Flow
 
 ```
 Admin sends: /invite
